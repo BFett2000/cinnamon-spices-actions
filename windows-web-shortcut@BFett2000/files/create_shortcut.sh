@@ -7,17 +7,43 @@ else
     DEST=$(xdg-user-dir DESKTOP)
 fi
 
-# Confirm URL of the link
+# Confirm URL or file path of the link
 URL=$(zenity --entry --width=250 --title "Shortcut Location" --text="Enter the URL or file path for this shortcut:" --entry-text="")
 if [ -z "$URL" ]; then
     notify-send --expire-time=200000 "Shortcut creation canceled."
     exit 1
 fi
 
+# Auto-format web addresses missing a scheme
+if [ ! -e "$URL" ]; then
+    case "$URL" in
+        http://*|https://*|file://*) ;;
+        *) URL="https://$URL" ;;
+    esac
+fi
+
+# Safe target validation: check if local path exists or if it begins with a valid web scheme
+if [ ! -e "$URL" ]; then
+    case "$URL" in
+        http://*|https://*|ftp://*)
+            ;;
+        *)
+            notify-send --expire-time=200000 "Error: '$URL' is not a valid file path or web address."
+            exit 1
+            ;;
+    esac
+fi
+
 # Confirm name of the shortcut
 NAME=$(zenity --entry --width=250 --title "Shortcut Name" --text="Enter a name for this shortcut:" --entry-text="")
 if [ -z "$NAME" ]; then
     notify-send --expire-time=200000 "Shortcut creation canceled."
+    exit 1
+fi
+
+# Verify target directory exists before file generation
+if [ ! -d "$DEST" ]; then
+    notify-send --expire-time=200000 "Error: Destination directory $DEST does not exist."
     exit 1
 fi
 
@@ -29,7 +55,7 @@ fi
 
 # Determine Icon Based on Target Type
 if [ -d "$URL" ]; then
-    # Local Folder Target: Query Nemo's metadata for a custom icon path
+    # Local Folder Target
     CUSTOM_ICON=$(gio info -a "metadata::custom-icon" "$URL" | grep "metadata::custom-icon:" | cut -d' ' -f4-)
 
     if [ -n "$CUSTOM_ICON" ]; then
@@ -38,21 +64,22 @@ if [ -d "$URL" ]; then
         ICON_ID="folder"
     fi
 else
-    # External Web Target: Isolate domain to fetch the dynamic web icon
-    DOMAIN=$(echo "$URL" | sed -E 's/^\s*.*:\/\///g' | cut -d'/' -f1)
+    # External Web Target: Isolate main domain host for icon fetch
+    HOST=$(echo "$URL" | awk -F'/' '{print $3}' | cut -d':' -f1)
 
-    # Define a clean local directory for custom downloaded web icons
+    # Extract base domain (e.g., assets.science.nasa.gov -> nasa.gov)
+    DOMAIN=$(echo "$HOST" | awk -F'.' '{ if (NF>2) print $(NF-1)"."$NF; else print $0 }')
+
     ICON_DIR="$HOME/.local/share/icons/web_shortcuts"
     mkdir -p "$ICON_DIR"
 
     LOCAL_ICON="$ICON_DIR/$DOMAIN.png"
 
-    # Download high-res favicon from secure API cache if it doesn't already exist locally
+    # Download high-res favicon using the root domain
     if [ ! -f "$LOCAL_ICON" ]; then
         curl -s -L "https://www.google.com/s2/favicons?sz=64&domain=$DOMAIN" -o "$LOCAL_ICON"
     fi
 
-    # Verify download succeeded and file has data; otherwise drop back to syncthing
     if [ -s "$LOCAL_ICON" ]; then
         ICON_ID="$LOCAL_ICON"
     else
@@ -60,19 +87,22 @@ else
     fi
 fi
 
-# Create the .desktop file using your original single-line layout
-echo -e "[Desktop Entry]\nName=$NAME\nType=Link\nURL=$URL\nComment=\nTerminal=false\nIcon=$ICON_ID\nType=Link" > "$DEST/$NAME.desktop"
+# Write .desktop file safely
+cat <<EOF > "$DEST/$NAME.desktop"
+[Desktop Entry]
+Name=$NAME
+URL=$URL
+Comment=
+Terminal=false
+Icon=$ICON_ID
+Type=Link
+EOF
 
-# Ensure correct file permissions
+# Ensure permissions and set shortcut overlay emblem
 chmod 644 "$DEST/$NAME.desktop"
+gio set -t stringv "$DEST/$NAME.desktop" metadata::emblems emblem-symbolic-link
 
-# Check if the file creation and permissions succeeded first
 if [ $? -eq 0 ]; then
-    # SUCCESS: Now apply the shortcut emblem metadata if it is an external web link
-    if [ ! -d "$URL" ]; then
-        gio set -t stringv "$DEST/$NAME.desktop" metadata::emblems emblem-symbolic-link
-    fi
-
     notify-send --expire-time=200000 "Shortcut successfully created in $DEST"
     exit 0
 else
